@@ -1,42 +1,47 @@
-const CACHE = 'minhasobra-app-v1';
-const ASSETS = [
-  './',
-  './index.html',
-  './manifest.webmanifest',
-  './icon-192.png',
-  './icon-512.png'
-];
-self.addEventListener('install', e => {
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)).then(() => self.skipWaiting()));
-});
-self.addEventListener('activate', e => {
+const CACHE = 'minhasobra-app-v2'
+const ASSETS = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png']
+
+self.addEventListener('install', (e) => {
+  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()))
+})
+
+self.addEventListener('activate', (e) => {
   e.waitUntil(
-    caches.keys().then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k))))
+    caches.keys().then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
       .then(() => self.clients.claim())
-  );
-});
-self.addEventListener('fetch', e => {
-  if (e.request.method !== 'GET') return;
+  )
+})
+
+self.addEventListener('fetch', (e) => {
+  if (e.request.method !== 'GET') return
+  const isPage = e.request.mode === 'navigate' || (e.request.headers.get('accept') || '').includes('text/html')
+  if (isPage) {
+    // Páginas: SEMPRE da rede primeiro (garante versão nova); cache só se estiver offline
+    e.respondWith(
+      fetch(e.request).then((res) => {
+        const copy = res.clone()
+        caches.open(CACHE).then((c) => c.put('./index.html', copy)).catch(() => {})
+        return res
+      }).catch(() => caches.match('./index.html'))
+    )
+    return
+  }
+  // Estáticos (JS/CSS com hash, ícones): cache primeiro, rede como complemento
   e.respondWith(
-    caches.match(e.request).then(hit => hit || fetch(e.request).then(res => {
-      const copy = res.clone();
-      caches.open(CACHE).then(c => c.put(e.request, copy)).catch(() => {});
-      return res;
-    }).catch(() => caches.match('./index.html')))
-  );
-});
+    caches.match(e.request).then((hit) => hit || fetch(e.request).then((res) => {
+      const copy = res.clone()
+      caches.open(CACHE).then((c) => c.put(e.request, copy)).catch(() => {})
+      return res
+    }))
+  )
+})
 
 // ----- Web Push (ativado quando você configurar VAPID + Edge Function) -----
 self.addEventListener('push', (event) => {
   let data = {}
   try { data = event.data ? event.data.json() : {} } catch (e) {}
   const title = data.title || 'Minha Sobra'
-  const options = {
-    body: data.body || '',
-    icon: 'icon-192.png',
-    badge: 'icon-192.png',
-    data: { url: data.url || '.' }
-  }
+  const options = { body: data.body || '', icon: 'icon-192.png', badge: 'icon-192.png', data: { url: data.url || '.' } }
   event.waitUntil(self.registration.showNotification(title, options))
 })
 self.addEventListener('notificationclick', (event) => {
