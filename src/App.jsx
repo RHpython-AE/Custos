@@ -1,20 +1,33 @@
 import { useEffect, useRef, useState } from 'react'
 import { supabase, isConfigured } from './supabaseClient'
-import { fmt, fmtBare, parseBR, MESES } from './format'
+import { fmt, fmtBare, parseBR, MESES, MESES_LONG } from './format'
 import {
   mkey, seedMonth, migrate, newCard, CARD_COLORS,
-  cartaoTotalBase, cartaoTotal, avulsoTotal, gastoTotal, openPaid,
-  getParcelas, newParcelaId, activeParcelas, extraByCard, parcelaKAt,
+  cartaoTotal, avulsoTotal, gastoTotal, openPaid, parcelaPaga, mergeLegacyPagas,
+  getParcelas, newParcelaId, activeParcelas, extraByCard,
   suggestCategorias, suggestBoletos, prevFilled, history, reminders,
-  loadCache, saveCache, loadFromCloud, upsertRow, deleteRow,
+  loadCache, saveCache, loadFromCloud, upsertRow, deleteRow, PARCELAS_KEY,
 } from './store'
 
-function MoneyInput({ value, onChange, ariaLabel }) {
+/* ---------- helpers ---------- */
+function traduz(msg) {
+  if (!msg) return 'Não foi possível autenticar.'
+  const m = String(msg).toLowerCase()
+  if (m.includes('invalid login')) return 'E-mail ou senha incorretos.'
+  if (m.includes('already registered')) return 'Este e-mail já tem conta. Toque em "entrar".'
+  if (m.includes('at least 6')) return 'A senha precisa de pelo menos 6 caracteres.'
+  if (m.includes('not confirmed')) return 'Confirme seu e-mail antes de entrar.'
+  if (m.includes('invalid api key')) return 'Chave da API inválida — confira as variáveis do deploy.'
+  if (m.includes('rate limit')) return 'Muitas tentativas. Aguarde um instante.'
+  return msg
+}
+
+function MoneyInput({ value, onChange, ariaLabel, big }) {
   const [txt, setTxt] = useState(fmtBare(value))
   const [focused, setFocused] = useState(false)
   useEffect(() => { if (!focused) setTxt(fmtBare(value)) }, [value, focused])
   return (
-    <div className="amt">
+    <div className={'amt' + (big ? ' big' : '')}>
       <span className="cur">R$</span>
       <input className="money" inputMode="decimal" aria-label={ariaLabel || 'valor'} value={txt}
         onFocus={() => { setFocused(true); setTxt(value != null ? String(value).replace('.', ',') : '') }}
@@ -28,29 +41,79 @@ function Chk({ on, onClick, label }) {
   return <button className={'chk' + (on ? ' on' : '')} aria-label={label} aria-pressed={on} onClick={onClick}>{on ? '✓' : ''}</button>
 }
 
-function Auth() {
-  const [mode, setMode] = useState('in'); const [email, setEmail] = useState(''); const [pass, setPass] = useState('')
-  const [err, setErr] = useState(''); const [ok, setOk] = useState(''); const [busy, setBusy] = useState(false)
-  async function submit() {
-    setErr(''); setOk(''); setBusy(true)
-    try {
-      if (mode === 'in') { const { error } = await supabase.auth.signInWithPassword({ email, password: pass }); if (error) throw error }
-      else { const { error } = await supabase.auth.signUp({ email, password: pass }); if (error) throw error; setOk('Conta criada. Se exigir confirmação por e-mail, confirme e entre.') }
-    } catch (e) { setErr(e.message || 'Não foi possível autenticar.') } finally { setBusy(false) }
-  }
+function Sheet({ title, onClose, children }) {
   return (
-    <div className="auth">
-      <div className="logo">R$</div><h1>Minha Sobra</h1>
-      <p>{mode === 'in' ? 'Entre na sua conta' : 'Crie sua conta'}</p>
-      <input type="email" placeholder="seu@email.com" value={email} onChange={(e) => setEmail(e.target.value)} />
-      <input type="password" placeholder="senha" value={pass} onChange={(e) => setPass(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') submit() }} />
-      <button className="primary" onClick={submit} disabled={busy}>{busy ? '...' : mode === 'in' ? 'Entrar' : 'Criar conta'}</button>
-      <button className="link" onClick={() => { setMode(mode === 'in' ? 'up' : 'in'); setErr(''); setOk('') }}>{mode === 'in' ? 'Não tem conta? Criar agora' : 'Já tenho conta — entrar'}</button>
-      <div className="err">{err}</div><div className="ok">{ok}</div>
+    <div className="sheet-overlay" onClick={onClose}>
+      <div className="sheet" onClick={(e) => e.stopPropagation()}>
+        <div className="sheet-head"><span>{title}</span><button aria-label="Fechar" onClick={onClose}>×</button></div>
+        <div className="sheet-body">{children}</div>
+      </div>
     </div>
   )
 }
 
+/* ---------- auth ---------- */
+function Auth() {
+  const [mode, setMode] = useState('in') // in | up | forgot
+  const [email, setEmail] = useState('')
+  const [pass, setPass] = useState('')
+  const [show, setShow] = useState(false)
+  const [err, setErr] = useState(''); const [ok, setOk] = useState(''); const [busy, setBusy] = useState(false)
+
+  async function submit() {
+    setErr(''); setOk(''); setBusy(true)
+    try {
+      if (mode === 'forgot') {
+        const { error } = await supabase.auth.resetPasswordForEmail(email)
+        if (error) throw error
+        setOk('Enviamos um link de redefinição para o seu e-mail.')
+      } else if (mode === 'in') {
+        const { error } = await supabase.auth.signInWithPassword({ email, password: pass })
+        if (error) throw error
+      } else {
+        const { error } = await supabase.auth.signUp({ email, password: pass })
+        if (error) throw error
+        setOk('Conta criada! Se pedir confirmação, veja seu e-mail e depois entre.')
+      }
+    } catch (e) { setErr(traduz(e.message)) } finally { setBusy(false) }
+  }
+
+  return (
+    <div className="auth2">
+      <div className="auth2-brand">
+        <div className="logo xl">R$</div>
+        <h1>Minha Sobra</h1>
+        <p>Seu dinheiro, na palma da mão</p>
+      </div>
+      <div className="auth2-card">
+        <h2>{mode === 'in' ? 'Entrar' : mode === 'up' ? 'Criar conta' : 'Recuperar senha'}</h2>
+        <label className="a2-label">E-mail</label>
+        <input className="a2-input" type="email" placeholder="seu@email.com" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" />
+        {mode !== 'forgot' && (<>
+          <label className="a2-label">Senha</label>
+          <div className="a2-pass">
+            <input className="a2-input" type={show ? 'text' : 'password'} placeholder="mínimo 6 caracteres" value={pass}
+              onChange={(e) => setPass(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') submit() }}
+              autoComplete={mode === 'in' ? 'current-password' : 'new-password'} />
+            <button className="a2-eye" aria-label={show ? 'Ocultar senha' : 'Mostrar senha'} onClick={() => setShow(!show)}>{show ? '🙈' : '👁'}</button>
+          </div>
+        </>)}
+        <button className="a2-primary" onClick={submit} disabled={busy}>
+          {busy ? '...' : mode === 'in' ? 'Entrar' : mode === 'up' ? 'Criar conta' : 'Enviar link'}
+        </button>
+        {mode === 'in' && <button className="a2-link subtle" onClick={() => { setMode('forgot'); setErr(''); setOk('') }}>Esqueci minha senha</button>}
+        <div className="a2-err">{err}</div>
+        <div className="a2-ok">{ok}</div>
+        <div className="a2-sep" />
+        <button className="a2-link" onClick={() => { setMode(mode === 'in' ? 'up' : 'in'); setErr(''); setOk('') }}>
+          {mode === 'in' ? 'Não tem conta? Criar agora' : 'Já tenho conta — entrar'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+/* ---------- app ---------- */
 export default function App() {
   const [session, setSession] = useState(null)
   const [ready, setReady] = useState(false)
@@ -60,23 +123,51 @@ export default function App() {
   const [month, setMonth] = useState(now.getMonth())
   const [view, setView] = useState('mes')
   const [sync, setSync] = useState('idle')
+  const [navHide, setNavHide] = useState(false)
   const timers = useRef({}); const syncTimer = useRef(null)
 
   useEffect(() => {
     if (!isConfigured) { setSession({ local: true, user: { email: 'modo local (sem nuvem)' } }); setReady(true); return }
     supabase.auth.getSession().then(({ data }) => { setSession(data.session); setReady(true) })
-    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => setSession(s))
+    const { data: sub } = supabase.auth.onAuthStateChange((event, s) => {
+      setSession(s)
+      if (event === 'PASSWORD_RECOVERY') {
+        const np = window.prompt('Digite a nova senha (mín. 6 caracteres):')
+        if (np) supabase.auth.updateUser({ password: np }).then(({ error }) => alert(error ? traduz(error.message) : 'Senha atualizada.'))
+      }
+    })
     return () => sub.subscription.unsubscribe()
   }, [])
+
   useEffect(() => {
     if (!session) return
-    setDb(loadCache())
-    loadFromCloud().then((cloud) => { if (cloud) setDb(cloud) }).catch(() => {})
+    const applyMerge = (base) => {
+      const { list, changed } = mergeLegacyPagas(base)
+      if (changed) {
+        const nd = { ...base, [PARCELAS_KEY]: { list } }
+        saveCache(nd); upsertRow(PARCELAS_KEY, { list }).catch(() => {})
+        return nd
+      }
+      return base
+    }
+    setDb(applyMerge(loadCache()))
+    loadFromCloud().then((cloud) => { if (cloud) setDb(applyMerge(cloud)) }).catch(() => {})
   }, [session])
+
+  // esconder a barra de abas ao rolar para baixo
+  useEffect(() => {
+    let last = window.scrollY
+    const onScroll = () => {
+      const y = window.scrollY
+      if (Math.abs(y - last) > 8) { setNavHide(y > last && y > 60); last = y }
+    }
+    window.addEventListener('scroll', onScroll, { passive: true })
+    return () => window.removeEventListener('scroll', onScroll)
+  }, [])
 
   const ym = mkey(year, month)
   const isNewMonth = db[ym] === undefined
-  const firstEver = Object.keys(db).filter((k) => k !== 'parcelas').length === 0 && year === now.getFullYear() && month === now.getMonth()
+  const firstEver = Object.keys(db).filter((k) => k !== PARCELAS_KEY).length === 0 && year === now.getFullYear() && month === now.getMonth()
   const M = migrate(db[ym] ? { ...db[ym] } : seedMonth(firstEver))
   const parcelas = getParcelas(db)
 
@@ -89,7 +180,7 @@ export default function App() {
     }, 500)
   }
   const commit = (next) => commitRow(ym, next)
-  const commitParcelas = (list) => commitRow('parcelas', { list })
+  const commitParcelas = (list) => commitRow(PARCELAS_KEY, { list })
   const mutate = (fn) => { const c = JSON.parse(JSON.stringify(M)); fn(c); commit(c) }
   function removeThisMonth() {
     if (!confirm('Excluir todos os dados deste mês? Não dá para desfazer.')) return
@@ -99,8 +190,8 @@ export default function App() {
   if (!ready) return null
   if (!session) return <Auth />
 
-  const localMode = !isConfigured
-  const years = [now.getFullYear() - 1, now.getFullYear(), now.getFullYear() + 1]
+  const monthOpts = []
+  for (let y = now.getFullYear() - 1; y <= now.getFullYear() + 1; y++) for (let m = 0; m < 12; m++) monthOpts.push({ y, m })
 
   return (
     <div>
@@ -111,41 +202,41 @@ export default function App() {
             <span style={{ marginLeft: 'auto', fontSize: 12, fontWeight: 600, color: sync === 'saved' ? 'var(--green)' : 'var(--muted)', minWidth: 62, textAlign: 'right' }}>
               {sync === 'saving' ? 'Salvando…' : sync === 'saved' ? 'Salvo ✓' : ''}
             </span>
-            <select className="yearsel" style={{ marginLeft: 8 }} value={year} onChange={(e) => setYear(parseInt(e.target.value))} aria-label="Ano">
-              {years.map((y) => <option key={y} value={y}>{y}</option>)}
-            </select>
+            {view === 'mes' && (
+              <select className="monthsel" aria-label="Mês e ano" value={`${year}-${month}`}
+                onChange={(e) => { const [y, m] = e.target.value.split('-').map(Number); setYear(y); setMonth(m) }}>
+                {monthOpts.map(({ y, m }) => <option key={`${y}-${m}`} value={`${y}-${m}`}>{MESES_LONG[m]} {y}</option>)}
+              </select>
+            )}
           </div>
-          {view === 'mes' && (
-            <div className="months">
-              {MESES.map((m, i) => <button key={i} className={'chip' + (i === month ? ' active' : '')} onClick={() => setMonth(i)}>{m}</button>)}
-            </div>
-          )}
         </div>
       </header>
 
       <main className="wrap">
-        {localMode && view === 'mes' && (
-          <div className="banner" style={{ marginTop: 12 }}>Modo local: sem login e sem nuvem. Os dados ficam só neste navegador — ótimo para testar. Configure o Supabase para ativar login e sincronização.</div>
-        )}
-        {view === 'mes' && <MesView M={M} mutate={mutate} db={db} parcelas={parcelas} year={year} month={month}
-          isNewMonth={isNewMonth} onCopyPrev={() => { const p = prevFilled(db, year, month); if (p) commit(p) }}
-          hasPrev={Boolean(prevFilled(db, year, month))} onDeleteMonth={removeThisMonth} monthLabel={`${MESES[month]} ${year}`} />}
-        {view === 'parcelas' && <ParcelasView db={db} parcelas={parcelas} commitParcelas={commitParcelas} year={year} month={month} />}
+        {view === 'mes' && <MesView M={M} mutate={mutate} db={db} parcelas={parcelas} commitParcelas={commitParcelas}
+          year={year} month={month} isNewMonth={isNewMonth}
+          onCopyPrev={() => { const p = prevFilled(db, year, month); if (p) commit(p) }}
+          hasPrev={Boolean(prevFilled(db, year, month))}
+          onDeleteMonth={removeThisMonth} monthLabel={`${MESES_LONG[month]} ${year}`} />}
         {view === 'hist' && <HistView db={db} parcelas={parcelas} goto={(y, m) => { setYear(y); setMonth(m); setView('mes') }} />}
         {view === 'gastos' && <GastosView db={db} parcelas={parcelas} />}
         {view === 'ajustes' && <AjustesView db={db} setDb={setDb} email={session.user.email} />}
       </main>
 
-      <nav>
-        {[['mes', '📅', 'Mês'], ['parcelas', '🧾', 'Parcelas'], ['hist', '🗂️', 'Histórico'], ['gastos', '📊', 'Gastos'], ['ajustes', '⚙️', 'Ajustes']].map(([k, ic, lb]) => (
-          <button key={k} className={view === k ? 'active' : ''} onClick={() => setView(k)}><span className="ic" aria-hidden="true">{ic}</span>{lb}</button>
+      <nav className={navHide ? 'hide' : ''}>
+        {[['mes', '📅', 'Mês'], ['hist', '🗂️', 'Histórico'], ['gastos', '📊', 'Gastos'], ['ajustes', '⚙️', 'Ajustes']].map(([k, ic, lb]) => (
+          <button key={k} className={view === k ? 'active' : ''} onClick={() => setView(k)}>
+            <span className="ic" aria-hidden="true">{ic}</span>{lb}
+          </button>
         ))}
       </nav>
     </div>
   )
 }
 
-function MesView({ M, mutate, db, parcelas, year, month, isNewMonth, onCopyPrev, hasPrev, onDeleteMonth, monthLabel }) {
+/* ---------- Mês ---------- */
+function MesView({ M, mutate, db, parcelas, commitParcelas, year, month, isNewMonth, onCopyPrev, hasPrev, onDeleteMonth, monthLabel }) {
+  const [sheet, setSheet] = useState(null)
   const cats = suggestCategorias(db); const bols = suggestBoletos(db)
   const extra = extraByCard(parcelas, year, month)
   const total = gastoTotal(M, parcelas, year, month)
@@ -154,6 +245,10 @@ function MesView({ M, mutate, db, parcelas, year, month, isNewMonth, onCopyPrev,
   const pct = liq > 0 ? Math.round(total / liq * 100) : 0
   const rem = reminders(db, parcelas, year, month)
   const actives = activeParcelas(parcelas, year, month)
+  const orphans = actives.filter(({ p }) => !M.cartoes.some((c) => c.nome === p.cartao))
+
+  const toggleParcela = (id, k) => commitParcelas(parcelas.map((p) => p.id === id ? { ...p, pagas: { ...(p.pagas || {}), [k]: !parcelaPaga(p, k) } } : p))
+  const removeParcela = (id) => { if (confirm('Remover esta compra parcelada de todos os meses?')) { commitParcelas(parcelas.filter((p) => p.id !== id)); setSheet(null) } }
 
   return (
     <section>
@@ -165,8 +260,7 @@ function MesView({ M, mutate, db, parcelas, year, month, isNewMonth, onCopyPrev,
           {rem.map((r, i) => (
             <div className="remind-row" key={i}>
               <span className="ri" aria-hidden="true">{r.tipo === 'fatura' ? '📅' : '⚠️'}</span>
-              <span className="rt">{r.texto}</span>
-              <span className="rv">{fmt(r.valor)}</span>
+              <span className="rt">{r.texto}</span><span className="rv">{fmt(r.valor)}</span>
             </div>
           ))}
         </div>
@@ -195,55 +289,61 @@ function MesView({ M, mutate, db, parcelas, year, month, isNewMonth, onCopyPrev,
         const cardParcelas = actives.filter(({ p }) => p.cartao === c.nome)
         return (
           <div className="card" key={ci}>
-            <div className="cardhead">
-              <button className="dot" aria-label="Trocar cor do cartão" style={{ background: c.cor }}
-                onClick={() => mutate((d) => { const idx = CARD_COLORS.indexOf(d.cartoes[ci].cor); d.cartoes[ci].cor = CARD_COLORS[(idx + 1) % CARD_COLORS.length] })} />
-              <input value={c.nome} placeholder="Nome do cartão" aria-label="Nome do cartão" onChange={(e) => mutate((d) => { d.cartoes[ci].nome = e.target.value })} />
-              <div className="venc">vence dia
-                <input inputMode="numeric" value={c.venc ?? ''} placeholder="—" aria-label="Dia de vencimento"
-                  onChange={(e) => mutate((d) => { const n = parseInt(e.target.value); d.cartoes[ci].venc = isNaN(n) ? null : Math.min(31, Math.max(1, n)) })} />
+            <div className="cardhead2">
+              <span className="dot-ro" style={{ background: c.cor }} />
+              <div className="ch-main">
+                <div className="ch-name">{c.nome || 'Cartão'}</div>
+                <div className="ch-sub">{c.venc ? `vence dia ${c.venc}` : 'sem vencimento'} · {fmt(cartaoTotal(c, extra))}</div>
               </div>
-              <button className="del" aria-label="Remover cartão" onClick={() => { if (confirm(`Remover o cartão "${c.nome || 'sem nome'}" e seus itens?`)) mutate((d) => { d.cartoes.splice(ci, 1) }) }}>🗑</button>
+              <button className="edit" aria-label="Editar cartão" onClick={() => setSheet({ t: 'card', ci })}>✎</button>
             </div>
             {c.itens.map((it, ii) => (
-              <div className="line" key={ii}>
+              <div className="line ro" key={ii}>
                 <Chk on={it.pago} label="Marcar como pago" onClick={() => mutate((d) => { d.cartoes[ci].itens[ii].pago = !d.cartoes[ci].itens[ii].pago })} />
-                <input className={'desc' + (it.pago ? ' paid' : '')} list="dl-cats" value={it.cat} placeholder="Categoria" aria-label="Categoria"
-                  onChange={(e) => mutate((d) => { d.cartoes[ci].itens[ii].cat = e.target.value })} />
-                <MoneyInput value={it.valor} ariaLabel="Valor" onChange={(v) => mutate((d) => { d.cartoes[ci].itens[ii].valor = v })} />
-                <button className="del" aria-label="Remover item" onClick={() => mutate((d) => { d.cartoes[ci].itens.splice(ii, 1) })}>×</button>
+                <span className={'ro-name' + (it.pago ? ' paid' : '')}>{it.cat || 'Sem nome'}</span>
+                <span className="ro-val">{fmt(it.valor)}</span>
+                <button className="edit" aria-label="Editar item" onClick={() => setSheet({ t: 'item', ci, ii })}>✎</button>
               </div>
             ))}
-            {cardParcelas.map(({ p, k }) => {
-              const pago = !!(M.parcelasPagas && M.parcelasPagas[p.id])
-              return (
-                <div className="line pline" key={p.id}>
-                  <Chk on={pago} label="Marcar parcela como paga" onClick={() => mutate((d) => { d.parcelasPagas[p.id] = !d.parcelasPagas[p.id] })} />
-                  <div className={'pdesc' + (pago ? ' paid' : '')}>{p.desc} <span className="pbadge">{k}/{p.n}</span></div>
-                  <div className="pval">{fmt(p.valor)}</div>
-                  <span style={{ width: 30 }} />
-                </div>
-              )
-            })}
-            <button className="addbtn" onClick={() => mutate((d) => { d.cartoes[ci].itens.push({ cat: '', valor: null, pago: false }) })}>+ Adicionar categoria</button>
-            <div className="subt"><span>Subtotal</span><span>{fmt(cartaoTotal(c, extra))}</span></div>
+            {cardParcelas.map(({ p, k }) => (
+              <div className="line ro pline" key={p.id}>
+                <Chk on={parcelaPaga(p, k)} label="Marcar parcela como paga" onClick={() => toggleParcela(p.id, k)} />
+                <span className={'ro-name' + (parcelaPaga(p, k) ? ' paid' : '')}>{p.desc} <span className="pbadge">{k}/{p.n}</span></span>
+                <span className="ro-val">{fmt(p.valor)}</span>
+                <button className="edit" aria-label="Ver parcelas" onClick={() => setSheet({ t: 'parc', id: p.id })}>✎</button>
+              </div>
+            ))}
+            <button className="addbtn" onClick={() => setSheet({ t: 'item', ci, ii: null })}>+ Adicionar gasto</button>
           </div>
         )
       })}
-      <button className="addbtn" style={{ borderStyle: 'solid', fontWeight: 800 }} onClick={() => mutate((d) => { d.cartoes.push(newCard(d.cartoes.length)) })}>+ Adicionar cartão</button>
+      {orphans.length > 0 && (
+        <div className="card">
+          <div className="cardhead2"><span className="dot-ro" style={{ background: 'var(--muted)' }} />
+            <div className="ch-main"><div className="ch-name">Parcelas (outros cartões)</div><div className="ch-sub">cartão original não está neste mês</div></div></div>
+          {orphans.map(({ p, k }) => (
+            <div className="line ro pline" key={p.id}>
+              <Chk on={parcelaPaga(p, k)} label="Marcar parcela como paga" onClick={() => toggleParcela(p.id, k)} />
+              <span className={'ro-name' + (parcelaPaga(p, k) ? ' paid' : '')}>{p.desc} <span className="pbadge">{k}/{p.n}</span></span>
+              <span className="ro-val">{fmt(p.valor)}</span>
+              <button className="edit" aria-label="Ver parcelas" onClick={() => setSheet({ t: 'parc', id: p.id })}>✎</button>
+            </div>
+          ))}
+        </div>
+      )}
+      <button className="addbtn" style={{ borderStyle: 'solid', fontWeight: 800 }} onClick={() => setSheet({ t: 'card', ci: null })}>+ Adicionar cartão</button>
 
       <div className="sec-title">Boletos à parte</div>
       <div className="card">
         {M.avulsos.map((b, i) => (
-          <div className="line" key={i}>
+          <div className="line ro" key={i}>
             <Chk on={b.pago} label="Marcar como pago" onClick={() => mutate((d) => { d.avulsos[i].pago = !d.avulsos[i].pago })} />
-            <input className={'desc' + (b.pago ? ' paid' : '')} list="dl-bol" value={b.nome} placeholder="Descrição" aria-label="Descrição"
-              onChange={(e) => mutate((d) => { d.avulsos[i].nome = e.target.value })} />
-            <MoneyInput value={b.valor} ariaLabel="Valor" onChange={(v) => mutate((d) => { d.avulsos[i].valor = v })} />
-            <button className="del" aria-label="Remover boleto" onClick={() => mutate((d) => { d.avulsos.splice(i, 1) })}>×</button>
+            <span className={'ro-name' + (b.pago ? ' paid' : '')}>{b.nome || 'Sem nome'}</span>
+            <span className="ro-val">{fmt(b.valor)}</span>
+            <button className="edit" aria-label="Editar boleto" onClick={() => setSheet({ t: 'boleto', ii: i })}>✎</button>
           </div>
         ))}
-        <button className="addbtn" onClick={() => mutate((d) => { d.avulsos.push({ nome: '', valor: null, pago: false }) })}>+ Adicionar boleto</button>
+        <button className="addbtn" onClick={() => setSheet({ t: 'boleto', ii: null })}>+ Adicionar boleto</button>
         <div className="subt"><span>Total boletos à parte</span><span>{fmt(avulsoTotal(M))}</span></div>
       </div>
 
@@ -257,80 +357,168 @@ function MesView({ M, mutate, db, parcelas, year, month, isNewMonth, onCopyPrev,
 
       <div className="card vr">
         <span className="tag">Cartão à parte</span>
-        <div className="field"><label>VR / VA</label><MoneyInput value={M.vr} ariaLabel="VR ou VA" onChange={(v) => mutate((d) => { d.vr = v })} /></div>
+        <div className="field"><label>VR / VA</label>
+          <MoneyInput value={M.vr} ariaLabel="VR ou VA" onChange={(v) => mutate((d) => { d.vr = v })} /></div>
         <div className="note">Informativo — não entra na sobra da conta.</div>
       </div>
 
       <div className="sec-title">Reserva</div>
       <div className="card">
-        <div className="field"><label>Meta de reserva</label><MoneyInput value={M.meta} ariaLabel="Meta de reserva" onChange={(v) => mutate((d) => { d.meta = v })} /></div>
+        <div className="field"><label>Meta de reserva</label>
+          <MoneyInput value={M.meta} ariaLabel="Meta de reserva" onChange={(v) => mutate((d) => { d.meta = v })} /></div>
         <div className="row" style={{ borderTop: '1px solid var(--line)', marginTop: 10, paddingTop: 12 }}>
           <span className="k">Sobra após reserva</span><span className="v">{fmt(sobra - meta)}</span>
         </div>
       </div>
 
       {!isNewMonth && <button className="danger" onClick={onDeleteMonth}>Excluir dados deste mês</button>}
+
+      {/* ---------- sheets ---------- */}
+      {sheet?.t === 'item' && (
+        <ItemSheet
+          card={M.cartoes[sheet.ci]}
+          initial={sheet.ii != null ? M.cartoes[sheet.ci].itens[sheet.ii] : null}
+          allowParcelado={sheet.ii == null}
+          year={year} month={month}
+          onSave={(cat, valor) => { mutate((d) => { if (sheet.ii != null) { d.cartoes[sheet.ci].itens[sheet.ii].cat = cat; d.cartoes[sheet.ci].itens[sheet.ii].valor = valor } else { d.cartoes[sheet.ci].itens.push({ cat, valor, pago: false }) } }); setSheet(null) }}
+          onSaveParcelado={(desc, valor, n, start) => { commitParcelas([...parcelas, { id: newParcelaId(), cartao: M.cartoes[sheet.ci].nome, desc, valor, n, start, pagas: {} }]); setSheet(null) }}
+          onDelete={sheet.ii != null ? () => { mutate((d) => { d.cartoes[sheet.ci].itens.splice(sheet.ii, 1) }); setSheet(null) } : null}
+          onClose={() => setSheet(null)} />
+      )}
+      {sheet?.t === 'boleto' && (
+        <BoletoSheet
+          initial={sheet.ii != null ? M.avulsos[sheet.ii] : null}
+          onSave={(nome, valor) => { mutate((d) => { if (sheet.ii != null) { d.avulsos[sheet.ii].nome = nome; d.avulsos[sheet.ii].valor = valor } else { d.avulsos.push({ nome, valor, pago: false }) } }); setSheet(null) }}
+          onDelete={sheet.ii != null ? () => { mutate((d) => { d.avulsos.splice(sheet.ii, 1) }); setSheet(null) } : null}
+          onClose={() => setSheet(null)} />
+      )}
+      {sheet?.t === 'card' && (
+        <CardSheet
+          initial={sheet.ci != null ? M.cartoes[sheet.ci] : null}
+          onSave={(nome, cor, venc) => { mutate((d) => { if (sheet.ci != null) { d.cartoes[sheet.ci].nome = nome; d.cartoes[sheet.ci].cor = cor; d.cartoes[sheet.ci].venc = venc } else { const nc = newCard(d.cartoes.length); nc.nome = nome || nc.nome; nc.cor = cor; nc.venc = venc; d.cartoes.push(nc) } }); setSheet(null) }}
+          onDelete={sheet.ci != null ? () => { if (confirm(`Remover o cartão "${M.cartoes[sheet.ci].nome}" e seus itens deste mês?`)) { mutate((d) => { d.cartoes.splice(sheet.ci, 1) }); setSheet(null) } } : null}
+          onClose={() => setSheet(null)} />
+      )}
+      {sheet?.t === 'parc' && (() => {
+        const p = parcelas.find((x) => x.id === sheet.id)
+        return p ? <ParcelaSheet p={p} onToggle={(k) => toggleParcela(p.id, k)} onDelete={() => removeParcela(p.id)} onClose={() => setSheet(null)} /> : null
+      })()}
     </section>
   )
 }
 
-function ParcelasView({ db, parcelas, commitParcelas, year, month }) {
-  const [desc, setDesc] = useState('')
-  const [cartao, setCartao] = useState('')
-  const [valor, setValor] = useState(null)
-  const [n, setN] = useState(2)
-  const [sy, setSy] = useState(year); const [sm, setSm] = useState(month)
-  const cardNames = [...new Set(Object.keys(db).filter((k) => k !== 'parcelas').flatMap((k) => (migrate(db[k]).cartoes || []).map((c) => c.nome)).filter(Boolean))]
-
-  function add() {
-    if (!desc.trim() || !valor || n < 1) { alert('Preencha descrição, valor da parcela e nº de parcelas.'); return }
-    const p = { id: newParcelaId(), cartao: cartao.trim() || (cardNames[0] || 'Cartão 1'), desc: desc.trim(), valor, n: parseInt(n), start: { y: sy, m: sm } }
-    commitParcelas([...parcelas, p]); setDesc(''); setValor(null); setN(2)
+/* ---------- sheets ---------- */
+function ItemSheet({ card, initial, allowParcelado, year, month, onSave, onSaveParcelado, onDelete, onClose }) {
+  const [nome, setNome] = useState(initial ? (initial.cat || '') : '')
+  const [valor, setValor] = useState(initial ? initial.valor : null)
+  const [tipo, setTipo] = useState('avista')
+  const [np, setNp] = useState(2)
+  const [sm, setSm] = useState(month); const [sy, setSy] = useState(year)
+  const parcelado = allowParcelado && tipo === 'parcelado'
+  function save() {
+    if (!nome.trim()) { alert('Dê um nome/categoria ao gasto.'); return }
+    if (valor == null || valor <= 0) { alert('Informe o valor.'); return }
+    if (parcelado) {
+      const n = parseInt(np)
+      if (!n || n < 2) { alert('Parcelado precisa de 2 ou mais parcelas.'); return }
+      onSaveParcelado(nome.trim(), valor, n, { y: sy, m: sm })
+    } else onSave(nome.trim(), valor)
   }
-  function remove(id) { if (confirm('Remover esta compra parcelada de todos os meses?')) commitParcelas(parcelas.filter((p) => p.id !== id)) }
-  const endLabel = (p) => { let em = p.start.m + p.n - 1, ey = p.start.y; while (em > 11) { em -= 12; ey += 1 } return `${MESES[em]}/${String(ey).slice(2)}` }
-
   return (
-    <section>
-      <div className="sec-title">Nova compra parcelada</div>
-      <div className="card">
-        <div className="prow"><label>Descrição</label><input className="pin" value={desc} placeholder="Ex.: Notebook" onChange={(e) => setDesc(e.target.value)} /></div>
-        <div className="prow"><label>Cartão</label><input className="pin" list="dl-cards" value={cartao} placeholder={cardNames[0] || 'Cartão'} onChange={(e) => setCartao(e.target.value)} />
-          <datalist id="dl-cards">{cardNames.map((c) => <option key={c} value={c} />)}</datalist></div>
-        <div className="prow"><label>Valor da parcela</label><MoneyInput value={valor} ariaLabel="Valor da parcela" onChange={setValor} /></div>
-        <div className="prow"><label>Nº de parcelas</label><input className="pin small" inputMode="numeric" value={n} onChange={(e) => setN(e.target.value.replace(/\D/g, '') || '')} /></div>
-        <div className="prow"><label>Começa em</label>
-          <span style={{ display: 'flex', gap: 6 }}>
-            <select value={sm} onChange={(e) => setSm(parseInt(e.target.value))} aria-label="Mês inicial">{MESES.map((m, i) => <option key={i} value={i}>{m}</option>)}</select>
-            <select value={sy} onChange={(e) => setSy(parseInt(e.target.value))} aria-label="Ano inicial">{[year - 1, year, year + 1].map((y) => <option key={y} value={y}>{y}</option>)}</select>
-          </span>
+    <Sheet title={initial ? 'Editar gasto' : `Novo gasto — ${card?.nome || 'Cartão'}`} onClose={onClose}>
+      {allowParcelado && (
+        <div className="seg">
+          <button className={tipo === 'avista' ? 'on' : ''} onClick={() => setTipo('avista')}>À vista</button>
+          <button className={tipo === 'parcelado' ? 'on' : ''} onClick={() => setTipo('parcelado')}>Parcelado</button>
         </div>
-        <button className="addbtn" style={{ borderStyle: 'solid', fontWeight: 800 }} onClick={add}>Adicionar parcelamento</button>
-      </div>
-
-      <div className="sec-title">Parcelamentos ativos</div>
-      <div className="card">
-        {parcelas.length === 0 && <div className="empty" style={{ padding: '14px 0' }}>Nenhuma compra parcelada cadastrada.</div>}
-        {parcelas.map((p) => {
-          const k = parcelaKAt(p, year, month)
-          const restantes = k ? p.n - k : (new Date(year, month) < new Date(p.start.y, p.start.m) ? p.n : 0)
-          return (
-            <div className="pitem" key={p.id}>
-              <div className="pmain">
-                <div className="pnm">{p.desc}</div>
-                <div className="psub">{p.cartao} · {fmt(p.valor)}/mês · {MESES[p.start.m]}/{String(p.start.y).slice(2)} → {endLabel(p)}</div>
-                <div className="pprog">{k ? `Parcela ${k} de ${p.n} neste mês` : 'Fora do mês selecionado'}{restantes > 0 ? ` · faltam ${restantes}` : k === p.n ? ' · última' : ''}</div>
-              </div>
-              <button className="del" aria-label="Remover parcelamento" onClick={() => remove(p.id)}>🗑</button>
-            </div>
-          )
-        })}
-      </div>
-      <div className="info">Cada parcela entra automaticamente no cartão informado, no mês certo, e some quando acaba. O valor conta no total do mês e no "Onde mais gasto".</div>
-    </section>
+      )}
+      <label className="s-label">{parcelado ? 'Descrição da compra' : 'Categoria'}</label>
+      <input className="s-input" list="dl-cats" value={nome} placeholder={parcelado ? 'Ex.: Notebook' : 'Ex.: Mercado'} onChange={(e) => setNome(e.target.value)} />
+      <label className="s-label">{parcelado ? 'Valor de cada parcela' : 'Valor'}</label>
+      <MoneyInput big value={valor} ariaLabel="Valor" onChange={setValor} />
+      {parcelado && (<>
+        <label className="s-label">Número de parcelas</label>
+        <input className="s-input" inputMode="numeric" value={np} onChange={(e) => setNp(e.target.value.replace(/\D/g, ''))} />
+        <label className="s-label">Primeira parcela em</label>
+        <div className="s-row">
+          <select value={sm} onChange={(e) => setSm(parseInt(e.target.value))}>{MESES_LONG.map((m, i) => <option key={i} value={i}>{m}</option>)}</select>
+          <select value={sy} onChange={(e) => setSy(parseInt(e.target.value))}>{[year - 1, year, year + 1].map((y) => <option key={y} value={y}>{y}</option>)}</select>
+        </div>
+        {valor > 0 && parseInt(np) >= 2 && <div className="s-hint">Total da compra: {fmt(valor * parseInt(np))} · entra automaticamente nos próximos meses</div>}
+      </>)}
+      <button className="s-primary" onClick={save}>{initial ? 'Salvar' : 'Adicionar'}</button>
+      {onDelete && <button className="s-danger" onClick={() => { if (confirm('Excluir este gasto?')) onDelete() }}>Excluir</button>}
+    </Sheet>
   )
 }
 
+function BoletoSheet({ initial, onSave, onDelete, onClose }) {
+  const [nome, setNome] = useState(initial ? (initial.nome || '') : '')
+  const [valor, setValor] = useState(initial ? initial.valor : null)
+  function save() {
+    if (!nome.trim()) { alert('Dê um nome ao boleto.'); return }
+    if (valor == null || valor <= 0) { alert('Informe o valor.'); return }
+    onSave(nome.trim(), valor)
+  }
+  return (
+    <Sheet title={initial ? 'Editar boleto' : 'Novo boleto'} onClose={onClose}>
+      <label className="s-label">Descrição</label>
+      <input className="s-input" list="dl-bol" value={nome} placeholder="Ex.: Aluguel" onChange={(e) => setNome(e.target.value)} />
+      <label className="s-label">Valor</label>
+      <MoneyInput big value={valor} ariaLabel="Valor" onChange={setValor} />
+      <button className="s-primary" onClick={save}>{initial ? 'Salvar' : 'Adicionar'}</button>
+      {onDelete && <button className="s-danger" onClick={() => { if (confirm('Excluir este boleto?')) onDelete() }}>Excluir</button>}
+    </Sheet>
+  )
+}
+
+function CardSheet({ initial, onSave, onDelete, onClose }) {
+  const [nome, setNome] = useState(initial ? (initial.nome || '') : '')
+  const [cor, setCor] = useState(initial ? initial.cor : CARD_COLORS[0])
+  const [venc, setVenc] = useState(initial && initial.venc != null ? String(initial.venc) : '')
+  function save() {
+    if (!nome.trim()) { alert('Dê um nome ao cartão.'); return }
+    const v = parseInt(venc)
+    onSave(nome.trim(), cor, isNaN(v) ? null : Math.min(31, Math.max(1, v)))
+  }
+  return (
+    <Sheet title={initial ? 'Editar cartão' : 'Novo cartão'} onClose={onClose}>
+      <label className="s-label">Nome do cartão</label>
+      <input className="s-input" value={nome} placeholder="Ex.: Nubank" onChange={(e) => setNome(e.target.value)} />
+      <label className="s-label">Cor</label>
+      <div className="s-colors">
+        {CARD_COLORS.map((c) => <button key={c} className={'s-dot' + (cor === c ? ' on' : '')} style={{ background: c }} aria-label={'Cor ' + c} onClick={() => setCor(c)} />)}
+      </div>
+      <label className="s-label">Dia de vencimento da fatura (opcional)</label>
+      <input className="s-input" inputMode="numeric" value={venc} placeholder="Ex.: 10" onChange={(e) => setVenc(e.target.value.replace(/\D/g, ''))} />
+      <button className="s-primary" onClick={save}>{initial ? 'Salvar' : 'Adicionar cartão'}</button>
+      {onDelete && <button className="s-danger" onClick={onDelete}>Excluir cartão</button>}
+    </Sheet>
+  )
+}
+
+function ParcelaSheet({ p, onToggle, onDelete, onClose }) {
+  const rows = []
+  for (let k = 1; k <= p.n; k++) { let mm = p.start.m + k - 1, yy = p.start.y; while (mm > 11) { mm -= 12; yy += 1 } rows.push({ k, label: `${MESES[mm]}/${String(yy).slice(2)}` }) }
+  const pagasN = rows.filter(({ k }) => parcelaPaga(p, k)).length
+  const restante = (p.n - pagasN) * (p.valor || 0)
+  return (
+    <Sheet title={p.desc} onClose={onClose}>
+      <div className="s-hint" style={{ marginTop: 0 }}>{p.cartao} · {fmt(p.valor)}/parcela · {pagasN} de {p.n} pagas · restam {fmt(restante)}</div>
+      <div className="parc-grid">
+        {rows.map(({ k, label }) => (
+          <button key={k} className={'parc-cell' + (parcelaPaga(p, k) ? ' on' : '')} onClick={() => onToggle(k)}>
+            <span className="pc-k">{k}/{p.n}</span><span className="pc-m">{label}</span><span className="pc-v">{parcelaPaga(p, k) ? 'paga ✓' : fmt(p.valor)}</span>
+          </button>
+        ))}
+      </div>
+      <div className="s-hint">Toque em qualquer parcela para marcar como paga — inclusive futuras, se você antecipar.</div>
+      <button className="s-danger" onClick={onDelete}>Excluir parcelamento</button>
+    </Sheet>
+  )
+}
+
+/* ---------- Histórico ---------- */
 function HistView({ db, parcelas, goto }) {
   const h = history(db, parcelas)
   const acc = h.reduce((a, x) => a + x.sobra, 0)
@@ -366,6 +554,7 @@ function HistView({ db, parcelas, goto }) {
   )
 }
 
+/* ---------- Gastos ---------- */
 function GastosView({ db, parcelas }) {
   const h = history(db, parcelas)
   const byCard = {}, byCat = {}, cardColor = {}; let grand = 0
@@ -402,6 +591,7 @@ function GastosView({ db, parcelas }) {
   )
 }
 
+/* ---------- Ajustes ---------- */
 function AjustesView({ db, setDb, email }) {
   const fileRef = useRef(null)
   const [perm, setPerm] = useState(typeof Notification !== 'undefined' ? Notification.permission : 'unsupported')
@@ -411,14 +601,14 @@ function AjustesView({ db, setDb, email }) {
     if (p === 'granted') {
       try {
         const key = import.meta.env.VITE_VAPID_PUBLIC_KEY
-        if (key && 'serviceWorker' in navigator) {
+        if (key && 'serviceWorker' in navigator && supabase) {
           const reg = await navigator.serviceWorker.ready
           const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlB64(key) })
           const { data: u } = await supabase.auth.getUser()
           if (u?.user?.id) await supabase.from('push_subscriptions').upsert({ user_id: u.user.id, subscription: sub, updated_at: new Date().toISOString() }, { onConflict: 'user_id' })
         }
         alert('Notificações ativadas.')
-      } catch (e) { alert('Permitido, mas o push ainda não está configurado no servidor. Lembretes no app seguem funcionando.') }
+      } catch { alert('Permitido, mas o push ainda não está configurado no servidor. Lembretes no app seguem funcionando.') }
     }
   }
   async function testar() {
@@ -457,11 +647,11 @@ function AjustesView({ db, setDb, email }) {
       <div className="sec-title">Notificações</div>
       <button className="aj" onClick={ativarNotif}><span>Ativar notificações</span><span className="s">{perm === 'granted' ? 'ativado ✓' : 'permitir ›'}</span></button>
       <button className="aj" onClick={testar}><span>Testar notificação</span><span className="s">›</span></button>
-      <div className="info">Os lembretes dentro do app (fatura vencendo, valor em aberto) já funcionam sozinhos. O push com o app fechado depende da Edge Function configurada no servidor — veja o README.</div>
       <div className="sec-title">Backup dos dados</div>
       <button className="aj" onClick={exportBackup}><span>Exportar backup</span><span className="s">baixar .json ›</span></button>
       <button className="aj" onClick={() => fileRef.current.click()}><span>Importar backup</span><span className="s">de um arquivo ›</span></button>
       <input ref={fileRef} type="file" accept="application/json" style={{ display: 'none' }} onChange={importBackup} />
+      <div className="info">Seus dados ficam na sua conta (nuvem) e em cache neste aparelho para funcionar offline.</div>
     </section>
   )
 }
@@ -472,14 +662,4 @@ function urlB64(base64) {
   const raw = atob(b64); const arr = new Uint8Array(raw.length)
   for (let i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i)
   return arr
-}
-
-function ConfigNeeded() {
-  return (
-    <div className="auth">
-      <div className="logo">R$</div><h1>Minha Sobra</h1>
-      <p>Configuração pendente</p>
-      <div className="banner" style={{ maxWidth: 320 }}>Defina <b>VITE_SUPABASE_URL</b> e <b>VITE_SUPABASE_ANON_KEY</b> nas variáveis de ambiente e recarregue. Veja o README.</div>
-    </div>
-  )
 }

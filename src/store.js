@@ -81,15 +81,37 @@ export function gastoTotal(d, parcelas, y, m) {
   const extra = parcelas ? extraByCard(parcelas, y, m) : {}
   return d.cartoes.reduce((a, c) => a + cartaoTotal(c, extra), 0) + avulsoTotal(d)
 }
+// paga por parcela individual: p.pagas = { [k]: true } — permite antecipar futuras
+export function parcelaPaga(p, k) { return !!(p.pagas && p.pagas[k]) }
+
 // open vs paid for a month
 export function openPaid(d, parcelas, y, m) {
   let paid = 0
   d.cartoes.forEach((c) => c.itens.forEach((it) => { if (it.pago) paid += (it.valor || 0) }))
   d.avulsos.forEach((b) => { if (b.pago) paid += (b.valor || 0) })
-  const pagasMap = d.parcelasPagas || {}
-  activeParcelas(parcelas || [], y, m).forEach(({ p }) => { if (pagasMap[p.id]) paid += (p.valor || 0) })
+  activeParcelas(parcelas || [], y, m).forEach(({ p, k }) => { if (parcelaPaga(p, k)) paid += (p.valor || 0) })
   const total = gastoTotal(d, parcelas, y, m)
   return { total, paid, open: total - paid }
+}
+
+// migra o modelo antigo (pago por mês em d.parcelasPagas) para p.pagas[k]
+export function mergeLegacyPagas(db) {
+  const row = db[PARCELAS_KEY]
+  if (!row || !row.list) return { list: (row && row.list) || [], changed: false }
+  let changed = false
+  const list = row.list.map((p) => ({ ...p, pagas: { ...(p.pagas || {}) } }))
+  for (const key in db) {
+    if (key === PARCELAS_KEY) continue
+    const d = db[key]; if (!d || !d.parcelasPagas) continue
+    const [y, m] = key.split('-').map(Number)
+    for (const id in d.parcelasPagas) {
+      if (!d.parcelasPagas[id]) continue
+      const p = list.find((x) => x.id === id); if (!p) continue
+      const k = parcelaKAt(p, y, m); if (!k) continue
+      if (!p.pagas[k]) { p.pagas[k] = true; changed = true }
+    }
+  }
+  return { list, changed }
 }
 
 // ---------- suggestions ----------
