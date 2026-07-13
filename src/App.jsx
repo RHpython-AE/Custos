@@ -5,7 +5,7 @@ import {
   mkey, seedMonth, migrate, newCard, CARD_COLORS,
   cartaoTotal, avulsoTotal, gastoTotal, openPaid, parcelaPaga, mergeLegacyPagas,
   getParcelas, newParcelaId, activeParcelas, extraByCard,
-  suggestCategorias, suggestBoletos, prevFilled, history, reminders,
+  suggestCategorias, suggestBoletos, prevFilled, history, reminders, resolveCardCor,
   loadCache, saveCache, loadFromCloud, upsertRow, deleteRow, PARCELAS_KEY,
 } from './store'
 
@@ -113,6 +113,15 @@ function Auth() {
   )
 }
 
+function templateMonth(db, y, m, firstEver) {
+  const base = seedMonth(firstEver)
+  if (!firstEver) {
+    const prev = prevFilled(db, y, m)
+    if (prev) base.cartoes = (prev.cartoes || []).map((c) => ({ nome: c.nome, cor: c.cor, venc: c.venc, itens: [] }))
+  }
+  return base
+}
+
 /* ---------- app ---------- */
 export default function App() {
   const [session, setSession] = useState(null)
@@ -168,7 +177,7 @@ export default function App() {
   const ym = mkey(year, month)
   const isNewMonth = db[ym] === undefined
   const firstEver = Object.keys(db).filter((k) => k !== PARCELAS_KEY).length === 0 && year === now.getFullYear() && month === now.getMonth()
-  const M = migrate(db[ym] ? { ...db[ym] } : seedMonth(firstEver))
+  const M = migrate(db[ym] ? { ...db[ym] } : templateMonth(db, year, month, firstEver))
   const parcelas = getParcelas(db)
 
   function commitRow(key, next) {
@@ -190,8 +199,10 @@ export default function App() {
   if (!ready) return null
   if (!session) return <Auth />
 
-  const monthOpts = []
-  for (let y = now.getFullYear() - 1; y <= now.getFullYear() + 1; y++) for (let m = 0; m < 12; m++) monthOpts.push({ y, m })
+  const floorY = now.getFullYear(), floorM = now.getMonth()
+  const yearList = year < floorY ? [year, floorY, floorY + 1] : [floorY, floorY + 1]
+  const baseMonths = year === floorY ? Array.from({ length: 12 - floorM }, (_, i) => floorM + i) : Array.from({ length: 12 }, (_, i) => i)
+  const monthList = baseMonths.includes(month) ? baseMonths : [month, ...baseMonths]
 
   return (
     <div>
@@ -202,12 +213,15 @@ export default function App() {
             <span style={{ marginLeft: 'auto', fontSize: 12, fontWeight: 600, color: sync === 'saved' ? 'var(--green)' : 'var(--muted)', minWidth: 62, textAlign: 'right' }}>
               {sync === 'saving' ? 'Salvando…' : sync === 'saved' ? 'Salvo ✓' : ''}
             </span>
-            {view === 'mes' && (
-              <select className="monthsel" aria-label="Mês e ano" value={`${year}-${month}`}
-                onChange={(e) => { const [y, m] = e.target.value.split('-').map(Number); setYear(y); setMonth(m) }}>
-                {monthOpts.map(({ y, m }) => <option key={`${y}-${m}`} value={`${y}-${m}`}>{MESES_LONG[m]} {y}</option>)}
+            {view === 'mes' && (<span className="mysel">
+              <select className="monthsel" aria-label="Mês" value={month} onChange={(e) => setMonth(parseInt(e.target.value))}>
+                {monthList.map((m) => <option key={m} value={m}>{MESES_LONG[m]}</option>)}
               </select>
-            )}
+              <select className="monthsel yr" aria-label="Ano" value={year}
+                onChange={(e) => { const y = parseInt(e.target.value); setYear(y); if (y === floorY && month < floorM) setMonth(floorM) }}>
+                {yearList.map((y) => <option key={y} value={y}>{y}</option>)}
+              </select>
+            </span>)}
           </div>
         </div>
       </header>
@@ -246,6 +260,7 @@ function MesView({ M, mutate, db, parcelas, commitParcelas, year, month, isNewMo
   const rem = reminders(db, parcelas, year, month)
   const actives = activeParcelas(parcelas, year, month)
   const orphans = actives.filter(({ p }) => !M.cartoes.some((c) => c.nome === p.cartao))
+  const orphanGroups = Object.entries(orphans.reduce((acc, o) => { const g = acc[o.p.cartao] || (acc[o.p.cartao] = []); g.push(o); return acc }, {}))
 
   const toggleParcela = (id, k) => commitParcelas(parcelas.map((p) => p.id === id ? { ...p, pagas: { ...(p.pagas || {}), [k]: !parcelaPaga(p, k) } } : p))
   const removeParcela = (id) => { if (confirm('Remover esta compra parcelada de todos os meses?')) { commitParcelas(parcelas.filter((p) => p.id !== id)); setSheet(null) } }
@@ -317,11 +332,16 @@ function MesView({ M, mutate, db, parcelas, commitParcelas, year, month, isNewMo
           </div>
         )
       })}
-      {orphans.length > 0 && (
-        <div className="card">
-          <div className="cardhead2"><span className="dot-ro" style={{ background: 'var(--muted)' }} />
-            <div className="ch-main"><div className="ch-name">Parcelas (outros cartões)</div><div className="ch-sub">cartão original não está neste mês</div></div></div>
-          {orphans.map(({ p, k }) => (
+      {orphanGroups.map(([nomeCartao, list]) => (
+        <div className="card" key={nomeCartao}>
+          <div className="cardhead2">
+            <span className="dot-ro" style={{ background: resolveCardCor(db, nomeCartao) || 'var(--muted)' }} />
+            <div className="ch-main">
+              <div className="ch-name">{nomeCartao}</div>
+              <div className="ch-sub">parcelamento em andamento · {fmt(list.reduce((a, { p }) => a + (p.valor || 0), 0))} neste mês</div>
+            </div>
+          </div>
+          {list.map(({ p, k }) => (
             <div className="line ro pline" key={p.id}>
               <Chk on={parcelaPaga(p, k)} label="Marcar parcela como paga" onClick={() => toggleParcela(p.id, k)} />
               <span className={'ro-name' + (parcelaPaga(p, k) ? ' paid' : '')}>{p.desc} <span className="pbadge">{k}/{p.n}</span></span>
@@ -330,7 +350,7 @@ function MesView({ M, mutate, db, parcelas, commitParcelas, year, month, isNewMo
             </div>
           ))}
         </div>
-      )}
+      ))}
       <button className="addbtn" style={{ borderStyle: 'solid', fontWeight: 800 }} onClick={() => setSheet({ t: 'card', ci: null })}>+ Adicionar cartão</button>
 
       <div className="sec-title">Boletos à parte</div>
@@ -414,6 +434,7 @@ function ItemSheet({ card, initial, allowParcelado, year, month, onSave, onSaveP
   const [tipo, setTipo] = useState('avista')
   const [np, setNp] = useState(2)
   const [sm, setSm] = useState(month); const [sy, setSy] = useState(year)
+  const nowD = new Date(); const fy = nowD.getFullYear(); const fm = nowD.getMonth()
   const parcelado = allowParcelado && tipo === 'parcelado'
   function save() {
     if (!nome.trim()) { alert('Dê um nome/categoria ao gasto.'); return }
@@ -441,8 +462,12 @@ function ItemSheet({ card, initial, allowParcelado, year, month, onSave, onSaveP
         <input className="s-input" inputMode="numeric" value={np} onChange={(e) => setNp(e.target.value.replace(/\D/g, ''))} />
         <label className="s-label">Primeira parcela em</label>
         <div className="s-row">
-          <select value={sm} onChange={(e) => setSm(parseInt(e.target.value))}>{MESES_LONG.map((m, i) => <option key={i} value={i}>{m}</option>)}</select>
-          <select value={sy} onChange={(e) => setSy(parseInt(e.target.value))}>{[year - 1, year, year + 1].map((y) => <option key={y} value={y}>{y}</option>)}</select>
+          <select value={sm} onChange={(e) => setSm(parseInt(e.target.value))}>
+            {(sy === fy ? MESES_LONG.map((_, i) => i).filter((i) => i >= fm) : MESES_LONG.map((_, i) => i)).map((i) => <option key={i} value={i}>{MESES_LONG[i]}</option>)}
+          </select>
+          <select value={sy} onChange={(e) => { const y = parseInt(e.target.value); setSy(y); if (y === fy && sm < fm) setSm(fm) }}>
+            {[fy, fy + 1].map((y) => <option key={y} value={y}>{y}</option>)}
+          </select>
         </div>
         {valor > 0 && parseInt(np) >= 2 && <div className="s-hint">Total da compra: {fmt(valor * parseInt(np))} · entra automaticamente nos próximos meses</div>}
       </>)}

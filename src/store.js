@@ -7,21 +7,22 @@ export const mkey = (y, m) => `${y}-${m}`
 export const CARD_COLORS = ['#0F9D6E', '#2563EB', '#D85A30', '#7F77DD', '#D4537E', '#BA7517']
 
 export function seedMonth(first) {
+  if (!first) return { liquido: null, vr: null, meta: null, cartoes: [], avulsos: [], parcelasPagas: {} }
   return {
-    liquido: first ? 4819.09 : null, vr: first ? 456.06 : null, meta: null,
+    liquido: 4819.09, vr: 456.06, meta: null,
     cartoes: [
       { nome: 'Cartão 1', cor: CARD_COLORS[0], venc: null, itens: [
-        { cat: 'Mercado', valor: first ? 350 : null, pago: false },
-        { cat: 'Transporte', valor: first ? 250 : null, pago: false },
-        { cat: 'Lazer', valor: first ? 200 : null, pago: false } ] },
+        { cat: 'Mercado', valor: 350, pago: false },
+        { cat: 'Transporte', valor: 250, pago: false },
+        { cat: 'Lazer', valor: 200, pago: false } ] },
       { nome: 'Cartão 2', cor: CARD_COLORS[1], venc: null, itens: [
-        { cat: 'Assinaturas', valor: first ? 80 : null, pago: false },
-        { cat: 'Compras', valor: first ? 300 : null, pago: false } ] },
+        { cat: 'Assinaturas', valor: 80, pago: false },
+        { cat: 'Compras', valor: 300, pago: false } ] },
     ],
     avulsos: [
-      { nome: 'Moradia', valor: first ? 1500 : null, pago: false },
-      { nome: 'Condomínio', valor: first ? 500 : null, pago: false },
-      { nome: 'Energia', valor: first ? 150 : null, pago: false } ],
+      { nome: 'Moradia', valor: 1500, pago: false },
+      { nome: 'Condomínio', valor: 500, pago: false },
+      { nome: 'Energia', valor: 150, pago: false } ],
     parcelasPagas: {},
   }
 }
@@ -125,6 +126,18 @@ export function suggestBoletos(db) {
   for (const k in db) { if (k === PARCELAS_KEY) continue; const d = migrate(db[k]); if (!d || !d.avulsos) continue; d.avulsos.forEach((b) => { const n = (b.nome || '').trim(); if (n) s.add(n) }) }
   return [...s].sort()
 }
+export function resolveCardCor(db, nome) {
+  const keys = Object.keys(db).filter((k) => k !== PARCELAS_KEY)
+    .map((k) => { const [y, m] = k.split('-').map(Number); return { k, y, m } })
+    .sort((a, b) => b.y - a.y || b.m - a.m)
+  for (const { k } of keys) {
+    const d = db[k]; if (!d || !d.cartoes) continue
+    const c = d.cartoes.find((x) => (x.nome || '') === nome)
+    if (c && c.cor) return c.cor
+  }
+  return null
+}
+
 export function prevFilled(db, y, m) {
   for (let i = 1; i <= 24; i++) {
     let mm = m - i, yy = y; while (mm < 0) { mm += 12; yy -= 1 }
